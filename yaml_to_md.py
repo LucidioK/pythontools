@@ -40,5 +40,9 @@ def yaml_to_md(yaml_file_path:str) -> str:
             f.write(f"{ed['degree']} - {ed['area']} - {ed['university']}<br/>\n")
 
 if __name__ == "__main__":
-    fn = sys.argv[1] if len(sys.argv) == 2 else r'C:\Users\lucid\OneDrive\LKPortfolio\cvlk3.yaml'
-    yaml_to_md(fn)
+    if len(sys.argv) != 2:
+        print('yaml_to_md.py YAML_FILE_PATH ')
+        print('Example:')
+        print(r'yaml_to_md.py C:\Users\lucid\OneDrive\LKPortfolio\cvlk3.yaml')
+        exit(1)
+    yaml_to_md(sys.argv[1])
