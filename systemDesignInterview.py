@@ -38,7 +38,7 @@
 #            "name": "Streamlit",
 #            "type": "python",
 #            "request": "launch",
-#            "program": "C:/Users/lucid/anaconda3/Scripts/streamlit.exe",
+#            "program": "C:/Users/lucid/anaconda3/Scripts/st.exe",
 #            "args": [
 #                 "run",
 #                 "${file}",
@@ -55,16 +55,30 @@
 #     In Linux/Mac:
 #       which streamlit
 #     In Windows:
-#       where.exe streamlit.exe
+#       where.exe st.exe
 #   Now, to debug your StreamLit program, select the Debug Tab, select "Streamlit"  the click the green debug button.
 #
 ##########################################################################################################
+
+import importlib
+def install_library_if_needed(package_name) -> None:
+    try:
+        importlib.import_module(package_name)
+    except ImportError:
+        import pip
+        pip.main(['install', package_name])
+
+install_library_if_needed('openai')
+install_library_if_needed('streamlit')
+install_library_if_needed('tiktoken')
 import openai
 import streamlit as st
 import tempfile
 import os
 import re
+import shutil
 import subprocess
+import tiktoken
 from time import sleep,time
 from typing import List
 from colorama import Fore, Style
@@ -80,16 +94,20 @@ def printB(s:str)                     -> None: printColor(Fore.BLUE, s)
 def printY(s:str)                     -> None: printColor(Fore.YELLOW, s)
 def printM(s:str)                     -> None: printColor(Fore.MAGENTA, s)
 def cleanString(s:str, character:str) -> str: return re.sub('[^A-Za-z]+', character, s.strip())
+def removeNonASCIICharacters(s:str)   -> str: return ''.join([c for c in s if ord(c) > 0 and ord(c) < 256])
 def getTempFilePath(title:str)        -> str: return os.path.join(tempfile.gettempdir(), f'{title}.txt')
 def changeExtension(file_path:str, new_extension: str) -> str: return f"{os.path.splitext(file_path)[0]}.{new_extension.strip('.')}"
 
 def openTempFile(title:str, mode:str) -> object:
+    title     = removeNonASCIICharacters(title)
     file_path = getTempFilePath(title)
+    file_path = removeNonASCIICharacters(file_path)
     if mode == 'r' and not os.path.exists(file_path):
         return None
     return open(file_path, mode)
 
 def saveInTempFolder(title:str,text:str) -> str: 
+    text = removeNonASCIICharacters(text)
     with openTempFile(title, 'w') as f:
         f.write(text)
     return f.name
@@ -97,9 +115,31 @@ def saveInTempFolder(title:str,text:str) -> str:
 def readFromTempFolderIfExists(title:str) -> str:
     try:
         with openTempFile(title, 'r') as f:
-            return f.read()
+            return removeNonASCIICharacters(f.read())
     except Exception:
         return None
+    
+def getEntitiesReferencedInSchema() -> str:
+    if schemaAnswerFile := getTempFileRelatedTo('Schema'):
+        with open(schemaAnswerFile, 'r') as f: schemaAnswer = f.read()
+        possiblePatterns = [r'(.*) Entity', r'- (.*?):[a-zA-Z0-9, _]+']
+        for possiblePattern in possiblePatterns:
+            if foundEntities := findDistinct(possiblePattern, schemaAnswer):
+                return ", ".join(foundEntities)
+    return None
+
+def getTempFileRelatedTo(fileNameRegexPattern:str) -> str:
+    pattern     = f"{st.session_state['CACHE_ID']}_{fileNameRegexPattern}.*\.txt"
+    temp_folder = tempfile.gettempdir()
+    files       = [os.path.join(temp_folder, f) for f in os.listdir(temp_folder) if re.match(pattern, f, re.IGNORECASE)]
+    return files[0] if files else None
+
+def num_tokens_from_string(string: str) -> int:
+    # model = st.session_state['ML_MODEL']
+    # model = '-'.join(model.split('-')[:3])
+    encoding = tiktoken.encoding_for_model(st.session_state['ML_MODEL'])
+    num_tokens = len(encoding.encode(string))
+    return num_tokens
 
 def queryAIUntilDone(what:str) -> str:
     """
@@ -125,7 +165,10 @@ def queryAIUntilDone(what:str) -> str:
         with st.spinner(f'Loading from OpenAI: {what}...'):
             for i in range(4):
                 try:
-                    response = openai.Completion.create(model="text-davinci-003",prompt=st.session_state['PROMPT'],temperature=1,max_tokens=1024,top_p=1,frequency_penalty=0,presence_penalty=0)
+                    prompt = st.session_state['PROMPT']
+                    num_tokens = num_tokens_from_string(prompt)
+                    printG(f'{num_tokens} tokens...')
+                    response = openai.Completion.create(model=st.session_state['ML_MODEL'],prompt=prompt,temperature=1,max_tokens=1024,top_p=1,frequency_penalty=0,presence_penalty=0)
                     printY(response.choices[0].text)
                     break
                 except Exception as ex:
@@ -133,7 +176,7 @@ def queryAIUntilDone(what:str) -> str:
                     sleep(5)
         answer  = response.choices[0].text
     st.session_state['PROMPT'] += answer
-    st.session_state['PROMPT'] = ''.join([c for c in st.session_state['PROMPT'] if ord(c) > 0 and ord(c) < 256])
+    st.session_state['PROMPT'] = removeNonASCIICharacters(st.session_state['PROMPT'])
     saveInTempFolder(cache_title, answer)
     return answer
 
@@ -164,7 +207,15 @@ def reloadDiagrams() -> None:
     Summary:
         Place the Text items with the locally cached text, then rebuild the UML diagrams with the cached PlantUML texts that were potentially reviewed by the user.
     """
+    def updateTempFile(itemType:str) -> None:
+        srcPath = f"{itemType}.txt"
+        if os.path.exists(srcPath):
+            if tempFilePath := getTempFileRelatedTo(itemType):
+                os.unlink(tempFilePath)
+                shutil.copyfile(f"{itemType}.txt", tempFilePath)
     placeDesignItems('.*Text')
+    updateTempFile('Sequence_Diagram')
+    updateTempFile('Class_Diagram')
     createThenPlaceUMLImage('Sequence_Diagram.txt', 'Sequence_Diagram')
     createThenPlaceUMLImage('Class_Diagram.txt', 'Class_Diagram')
     addReloadButton()
@@ -267,7 +318,11 @@ def retrieveUMLFromOpenAI(what:str, umlType:str) -> None:
         umlType (str): A PlantUML type of diagram, such as Class Diagram or Sequence Diagram.
     """
     printG(f'\n\nRetrieving UML {what} diagram...\n')
-    st.session_state['PROMPT'] += f'\n\nPlease provide the {what} for this design, using the PlantUML notation.'
+    st.session_state['PROMPT'] += f'\n\nPlease provide the {what} for this design, using the PlantUML notation. '
+    if entitiesReferencedInSchema := getEntitiesReferencedInSchema():
+        st.session_state['PROMPT'] += f'Include all entities from the schema: {entitiesReferencedInSchema}.'
+    else:
+        st.warning('Could not find the entity list from the schema.')
     diagram          = queryAIUntilDone(what)
     diagram_position = diagram.rfind('@startuml')
     diagram          = diagram[diagram_position:]
@@ -302,14 +357,14 @@ def get_system_design_prompt_sequence() -> List[dict]:
             Notation: Plain Text, Sequence Diagram or Class Diagram.
     """
     return [ 
-        { 'Notation' : 'Plain Text',       'What' : 'Use Cases'                                                                                   },
-        { 'Notation' : 'Plain Text',       'What' : 'Number of Users, Requests per Day, Average Request Size in Bytes according to the Use Cases' },
-        { 'Notation' : 'Plain Text',       'What' : 'Functional Requirements according to the Use Cases'                                          },
-        { 'Notation' : 'Plain Text',       'What' : 'Non Functional Requirements according to the Use Cases'                                      },
-        { 'Notation' : 'Plain Text',       'What' : 'Schema according to the Use Cases'                                                           },
-        { 'Notation' : 'Plain Text',       'What' : 'REST API according to the Use Cases and the Schema'                                          },
-        { 'Notation' : 'Sequence Diagram', 'What' : 'Sequence Diagram according to the REST API and the Schema'                                   },
-        { 'Notation' : 'Class Diagram',    'What' : 'Class Diagram according to the Schema'                                                       },
+        {  'Notation' : 'Plain Text',       'What' : 'Use Cases'                                                                                   }
+        ,{ 'Notation' : 'Plain Text',       'What' : 'Number of Users, Requests per Day, Average Request Size in Bytes according to the Use Cases' }
+        ,{ 'Notation' : 'Plain Text',       'What' : 'Functional Requirements according to the Use Cases'                                          }
+        ,{ 'Notation' : 'Plain Text',       'What' : 'Non Functional Requirements according to the Use Cases'                                      }
+        ,{ 'Notation' : 'Plain Text',       'What' : 'Schema according to the Use Cases, in a list with only Entity name and Attribute names in each line' }
+        ,{ 'Notation' : 'Plain Text',       'What' : 'REST API according to the Use Cases and the Schema'                                          }
+        ,{ 'Notation' : 'Sequence Diagram', 'What' : 'Sequence Diagram according to the REST API and the Schema'                                   }
+        ,{ 'Notation' : 'Class Diagram',    'What' : 'Class Diagram according to the Schema'                                                       }
     ]
 
 def placeDesignItems(item_notations_regex_patterns_to_place:str) -> None:
@@ -378,6 +433,8 @@ def initialChecks() -> bool:
  
 if initialChecks():
     st.title("Lulu's System Design Interview Helper")
+    st.session_state['ML_MODEL']         = st.text_input('ML Model', value='gpt-3.5-turbo-instruct')
+    st.info('https://platform.openai.com/account/limits')
     st.session_state['JOB_TITLE']        = st.text_input('Job Title', value='Software Development Manager')
     st.session_state['SYSTEM_TO_DESIGN'] = st.text_input('System to be designed:', value='TicketMaster')
     if os.environ['OPENAI_API_KEY'] and st.session_state['JOB_TITLE'] and st.session_state['SYSTEM_TO_DESIGN']:
