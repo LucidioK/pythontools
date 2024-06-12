@@ -1,3 +1,16 @@
+# This script deletes all emails in Outlook except the most recent email in each thread. It is useful for cleaning up your inbox and other folders.
+# The script uses the win32com.client module to interact with Outlook. It retrieves emails from the specified folders, organizes them by conversation ID, and determines which emails to delete based on their conversation ID.
+# The script then deletes the emails from the specified folders and moves them to the Deleted Items folder. It marks the emails as unread and displays a progress bar to track the deletion process.
+# The script can be run from the command line with the --inbox flag to include the inbox in the cleanup. 
+# You can also include a regular expression to specify categories that should be kept and not deleted.
+# IMPORTANT: 
+#  * This script only works on Windows and requires the win32com.client module. 
+#  * The first time you run, Windows might ask you to configure the previous version of Outlook. This is because the newest version of Outlook does not support the win32com.client module. But Office installs the previous version of Outlook together with the newer, so you can still use the script to clean up your emails.
+#  * It also requires Outlook to be installed on the system.
+#  * At the beginning of the script, all instances of Outlook are killed to prevent any conflicts.
+#  * The script will move the emails to the Deleted folder, NOT permanently delete them. You can recover them from the Deleted Items folder if needed.
+#  * The script may take some time to run, depending on the number of emails in your folders. Especially the first time you run, since you may have a lot of emails to process.
+
 import argparse
 import json
 import os
@@ -140,6 +153,29 @@ def delete_items(folders: list['win32com.client.CDispatch'], to_be_deleted: set[
                 deleted += 1
     return deleted
 
+def get_initial_description() -> str:
+    """
+    Retrieves the initial description from this script file.
+    The initial description is the text that comes after lines starting with "# " until the first line that does not start with "# ".
+
+    Parameters:
+    None
+
+    Returns:
+    str: The initial description of the script.
+
+    """
+    initial_description = ""
+    description_mark = "# "
+    with open(__file__) as f:
+        lines = f.readlines()
+        for line in lines:
+            if line.startswith(description_mark):
+                initial_description += line[len(description_mark):]
+            else:
+                break
+    return initial_description
+
 def main(include_inbox: bool = False) -> None:
     folders       = retrieve_folders(include_inbox)
     total_count   = sum(f.Items.Count for f in folders)
@@ -152,7 +188,19 @@ subprocess.call(['powershell', '" Get-Process OUTLOOK -ErrorAction SilentlyConti
 OUTLOOK = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Cleanup your emails.")
+    usage = f"""
+
+
+{GREEN}python CleanupEmails.py {CYAN}[-h] [--inbox] [--keep-category-regex KEEP_CATEGORY_REGEX]{GREEN}
+
+  {CYAN}--inbox {GREEN}or{CYAN} -i{GREEN}: Include the inbox in the cleanup. Without this option, only the subfolders under inbox will be cleaned.
+  {CYAN}--keep-category-regex {GREEN}or{CYAN} -k{GREEN}: Regular expression with the categories to be kept, ignoring case, default is {CYAN}'Keep'{GREEN}. Items marked with these categories will not be deleted.
+  {CYAN}--help {GREEN}or{CYAN} -h{GREEN}: Show this help message and exit.
+
+  {GREEN}Example: {CYAN}python CleanupEmails.py --inbox --keep-category-regex "Keep|Important"{NO_COLOR}
+"""
+    usage += f"\n\n{YELLOW}{get_initial_description()}{NO_COLOR}\n\n"
+    parser = argparse.ArgumentParser(description="Cleanup your emails from Outlook.", usage=usage)
     parser.add_argument(
         "--inbox", 
         "-i", 
