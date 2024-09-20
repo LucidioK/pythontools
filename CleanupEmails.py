@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 if sys.platform != "win32":
     print("This script only works on Windows.")
@@ -54,8 +55,7 @@ SENT_ITEMS = 5
 INBOX_ITEMS = 6
 
 KEEP_CATEGORY_REGEX = re.compile("Keep")
-ENTRY_SUBJECT_BY_ENTRY_ID = {}
-
+DEFAULT_START_DATE = (datetime.now() - timedelta(days=3650)).strftime("%Y-%m-%d")
 
 # Simple function to print the attributes of an object, for debugging purposes only.
 def dj(x: object) -> None:
@@ -69,12 +69,16 @@ def progress(counter: int, total: int, message: str = "") -> None:
     bar += " " * (int(PROGRESS_WIDTH - percent_width))
     print(end=f"\r{YELLOW}|{bar}| {message[:MESSAGE_WIDTH]}{NO_COLOR}")
 
-
 def retrieve_emails(
-    folders: list["win32com.client.CDispatch"], total_count: int
+    folders: list["win32com.client.CDispatch"], 
+    total_count: int,
+    start_date:datetime
 ) -> dict[str, list[tuple]]:
     """
     This function retrieves emails from the given folders and organizes them by conversation ID.
+
+    I am not using folder.GetTable().GetArray() here because GetArray does not return the
+        item's ConversationId, which is the way I coalesce conversation items.
 
     Parameters:
     folders (list['win32com.client.CDispatch']): A list of Outlook folders to retrieve emails from.
@@ -100,14 +104,14 @@ def retrieve_emails(
                 f"Processing {processed} of {total_count}                   ",
             )
             item = folder.Items(j)
-            if KEEP_CATEGORY_REGEX.match(item.Categories, re.IGNORECASE):
+            if item.CreationTime.timestamp() < start_date.timestamp() \
+                or \
+                KEEP_CATEGORY_REGEX.match(item.Categories, re.IGNORECASE):
                 continue
             emails[item.ConversationId].append(
                 (item.CreationTime, item.EntryID, folder, j, folder.Name)
             )
-            ENTRY_SUBJECT_BY_ENTRY_ID[item.EntryID] = item.Subject
     return emails
-
 
 def determine_items_to_be_deleted(emails: dict[str, list[tuple]]) -> list:
     """
@@ -167,7 +171,7 @@ def retrieve_folders(include_inbox: bool) -> list["win32com.client.CDispatch"]:
     it includes the inbox in the retrieval. It prints the number of folders being looked at.
     """
     inbox = OUTLOOK.GetDefaultFolder(INBOX_ITEMS)
-    print(f"{GREEN}Looking at {CYAN}{inbox.Folders.Count} {GREEN} Folders{NO_COLOR}")
+    print(f"\n{GREEN}Looking at {CYAN}{inbox.Folders.Count} {GREEN} Folders{NO_COLOR}")
     folders = [inbox.Folders(i) for i in range(1, inbox.Folders.Count + 1)]
     folders.extend([inbox] if include_inbox else [])
     return folders
@@ -190,7 +194,7 @@ def delete_items(to_be_deleted: set[str]) -> int:
     The function also keeps track of the total number of emails processed and displays 
         a progress bar.
     """
-    print(f"{GREEN}Deleting {CYAN}{len(to_be_deleted)} {GREEN} emails.{NO_COLOR}")
+    print(f"\n{GREEN}Deleting {CYAN}{len(to_be_deleted)} {GREEN} emails.{NO_COLOR}")
     processed = 0
     deleted = 0
     deleted_items_folder = OUTLOOK.GetDefaultFolder(DELETED_ITEMS)
@@ -237,42 +241,46 @@ def get_initial_description() -> str:
                 break
     return initial_description
 
+def kill_outlook() -> None:
+    """
+    Kill any existing Outlook processes using PowerShell.
+    """
+    subprocess.call(
+        [
+            "powershell",
+            '" Get-Process OUTLOOK -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); }"',
+        ]
+    )
+    subprocess.call(
+        [
+            "powershell",
+            '" Get-Process olk     -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); }"',
+        ]
+    )
 
-def main(include_inbox: bool = False) -> None:
+def validate_date(date_text):
+    try:
+        return datetime.strptime(date_text, "%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid date format: '{date_text}'. Expected format: YYYY-MM-DD"
+        )
+
+def main(include_inbox: bool = False, start_date:datetime = DEFAULT_START_DATE) -> None:
+    kill_outlook()    
     folders = retrieve_folders(include_inbox)
     total_count = sum(f.Items.Count for f in folders)
-    emails = retrieve_emails(folders, total_count)
+    emails = retrieve_emails(folders, total_count, start_date)
     to_be_deleted = determine_items_to_be_deleted(emails)
     deleted_count = delete_items(to_be_deleted)
     print(f"\n\n{GREEN}Done, deleted {deleted_count} items.{NO_COLOR}")
 
-
-subprocess.call(
-    [
-        "powershell",
-        '" Get-Process OUTLOOK -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); }"',
-    ]
-)
-subprocess.call(
-    [
-        "powershell",
-        '" Get-Process olk     -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); }"',
-    ]
-)
 OUTLOOK = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
 
 if __name__ == "__main__":
     usage = f"""
 
-
 {GREEN}python CleanupEmails.py {CYAN}[-h] [--inbox] [--keep-category-regex KEEP_CATEGORY_REGEX]{GREEN}
-
-  {CYAN}--inbox {GREEN}or{CYAN} -i{GREEN}: Include the inbox in the cleanup. Without this option, 
-        only the subfolders under inbox will be cleaned.
-  {CYAN}--keep-category-regex {GREEN}or{CYAN} -k{GREEN}: Regular expression with the categories to
-        be kept, ignoring case, default is {CYAN}'Keep'{GREEN}. Items marked with these categories
-        will not be deleted.
-  {CYAN}--help {GREEN}or{CYAN} -h{GREEN}: Show this help message and exit.
 
   {GREEN}Example: {CYAN}python CleanupEmails.py --inbox --keep-category-regex "Keep|Important"
   {NO_COLOR}
@@ -282,7 +290,10 @@ if __name__ == "__main__":
         description="Cleanup your emails from Outlook.", usage=usage
     )
     parser.add_argument(
-        "--inbox", "-i", help="Include the inbox in the cleanup", action="store_true"
+        "--inbox", 
+        "-i", 
+        help="Include the inbox in the cleanup", 
+        action="store_true"
     )
     parser.add_argument(
         "--keep-category-regex",
@@ -292,8 +303,16 @@ if __name__ == "__main__":
         type=str,
         default="Keep",
     )
+    parser.add_argument(
+        "-s",
+        "--start-date",
+        type=validate_date,
+        default=DEFAULT_START_DATE,
+        required=False,
+        help=f"Start date to start email search in format YYYY-MM-DD, default is {DEFAULT_START_DATE}.",
+    )    
     args = parser.parse_args()
     KEEP_CATEGORY_REGEX = re.compile(args.keep_category_regex)
-    main(args.inbox)
+    main(args.inbox, args.start_date)
     OUTLOOK.Application.Quit()
     del OUTLOOK
