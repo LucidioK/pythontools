@@ -21,9 +21,9 @@ questions = [
     [19, "B;I identify and discuss all of our differences"               , "D;I try to avoid confrontations"],
     [20, "A;I obtain my share of concessions"                            , "E;I strive to maintain relationships"],
     [21, "B;I identify and discuss all of our differences"               , "C;I look for the compromises that might bridge the gap"],
-    [22, "E;I develop good relations with the other party"               , "B;I develop options that address both alone needs"],
+    [22, "E;I develop good relations with the other party"               , "B;I develop options that address both of our needs"],
     [23, "C;I seek the middle ground"                                    , "A;I strive to achieve my goals in negotiations"],
-    [24, "B;I identify all of our differences and look for solutions"    , "D;1 try to avoid unnecessary conflicts"],
+    [24, "B;I identify all of our differences and look for solutions"    , "D;I try to avoid unnecessary conflicts"],
     [25, "B;I try to preserve the relationship with my counterpart"      , "C;I search for fair compromises"],
     [26, "D;I emphasize the issues on which we agree"                    , "B;I uncover and address the things on which we disagree"],
     [27, "A;I work hard to achieve my goals"                             , "B;I pay attention to the other person's needs"],
@@ -37,12 +37,12 @@ for question in questions:
     texts    = [question[1].split(';')[1],question[2].split(';')[1]]
     print(f'\nSelect statement you think is more accurate for you {question[0]}/{len(questions)}:')
     option = -1
-    while option != 1 and option != 0:
+    while option not in [1, 0]:
         try:
             print(f' 0: {texts[0]}')
             print(f' 1: {texts[1]}')
             option = int(input())
-        except:
+        except Exception:
             option = -1
     totals[letters[option]] += 1
 
