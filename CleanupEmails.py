@@ -61,6 +61,24 @@ DEFAULT_START_DATE = (datetime.now() - timedelta(days=3650)).strftime("%Y-%m-%d"
 def dj(x: object) -> None:
     print(json.dumps(dir(x), indent=2, default=str))
 
+def get_item_data(id: str, i: int, count:int) -> dict:
+   """Returns a dictionary with the EntryId, ConversationId, and CreationTime of an Outlook item."""
+   try:
+     item = OUTLOOK.GetItemFromID(id)
+     progress(
+         i + 1,
+         count,
+         f"{CYAN}{i+1}{GREEN}/{CYAN}{count} {GREEN}{item.Subject[:32]}                  {NO_COLOR}",
+     )
+     return {
+         'EntryId': item.EntryID,
+         'ConversationId': item.ConversationId,
+         'CreationTime': datetime.fromtimestamp(item.CreationTime.timestamp()),
+         'Categories': item.categories
+     }
+   except:
+     return None
+
 
 def progress(counter: int, total: int, message: str = "") -> None:
     percent = counter / total
@@ -77,7 +95,7 @@ def retrieve_emails(
     """
     This function retrieves emails from the given folders and organizes them by conversation ID.
 
-    I am not using folder.GetTable().GetArray() here because GetArray does not return the
+    I am not using folder.GetTable().GetArray(folder.Items.Count + 1) here because GetArray does not return the
         item's ConversationId, which is the way I coalesce conversation items.
 
     Parameters:
@@ -90,30 +108,42 @@ def retrieve_emails(
         item index, and folder name.
 
     """
+    def quick_retrieve_items_from_folders(folders: list["win32com.client.CDispatch"], start_date: datetime) -> set:
+        print(f"{GREEN}Retrieving ids from folders, this is quick.{NO_COLOR}")
+        msgIds = set()
+        for i, folder in enumerate(folders):
+            progress(i + 1, len(folders), folder.Name)
+            msgIds = msgIds.union(set([
+                msg[0] 
+                for 
+                    msg 
+                in
+                    folder.GetTable().GetArray(folder.Items.Count + 1)
+                if
+                    msg
+                    and
+                    msg[2].timestamp() >= start_date.timestamp()
+            ]))
+        return msgIds
+
+    print(f"\n\n{GREEN}Found {CYAN}{total_count}{GREEN} items, now checking threads.{NO_COLOR}")
+    msgIds = quick_retrieve_items_from_folders(folders, start_date)
+    
+    print(f"\n{GREEN}Retrieving items from ids, this takes time...{NO_COLOR}\n")
+    items = [get_item_data(id, i, len(msgIds)) for i,id in enumerate(msgIds)]
+    items = [item for item in items if item] # remove items we could not retrieve
+    items = [item for item in items if item['CreationTime'].timestamp() >= start_date.timestamp()] # remove items older than start_date
+    items = [item for item in items if not KEEP_CATEGORY_REGEX.match(item['Categories'], re.IGNORECASE)] # remove items with categories to keep
     emails = defaultdict(list)
-    print(
-        f"\n{GREEN}Found {CYAN}{total_count}{GREEN} items, now checking threads.{NO_COLOR}"
-    )
-    processed = 0
-    for folder in folders:
-        for j in range(1, folder.Items.Count + 1):
-            processed += 1
-            progress(
-                processed,
-                total_count,
-                f"Processing {processed} of {total_count}                   ",
-            )
-            item = folder.Items(j)
-            if item.CreationTime.timestamp() < start_date.timestamp() \
-                or \
-                KEEP_CATEGORY_REGEX.match(item.Categories, re.IGNORECASE):
-                continue
-            emails[item.ConversationId].append(
-                (item.CreationTime, item.EntryID, folder, j, folder.Name)
-            )
+    for item in items:
+        emails[item['ConversationId']].append(
+            (item['CreationTime'], item['EntryId'])
+        )
     return emails
 
-def determine_items_to_be_deleted(emails: dict[str, list[tuple]]) -> list:
+
+
+def determine_items_to_be_deleted(emails: dict[str, list[tuple]], older_than:datetime = DEFAULT_START_DATE) -> list:
     """
     This function identifies which emails should be deleted based on their conversation IDs.
 
@@ -128,34 +158,59 @@ def determine_items_to_be_deleted(emails: dict[str, list[tuple]]) -> list:
     The function iterates over the emails dictionary, sorts the emails within each conversation
         by creation time, and adds the entry IDs of all but the most recent email to the 'to_be_deleted' set.
     """
-    to_be_deleted = set()
-    total_count = sum(len(emails[k]) for k in emails.keys())
-    print(
-        f"\n{GREEN}Finding which emails to delete: {CYAN}{len(emails)}{GREEN} unique items out of "
-        f"{CYAN}{total_count}{GREEN} overall.{NO_COLOR}"
-    )
-    processed = 0
-    for conversation_id in emails:
-        processed += 1
-        progress(
-            processed,
-            len(emails),
-            f"Adding emails to be deleted {processed} of {len(emails)}, {len(to_be_deleted)} "
-            "to be deleted.                ",
-        )
-        emails[conversation_id].sort()
-        to_be_deleted = to_be_deleted.union(
+    def mark_conversation_items_other_than_the_last_to_be_deleted(
+            emails: dict[str, list[tuple]], 
+            to_be_deleted:set, 
+            conversation_id:str) ->set:
+        return to_be_deleted.union(
             set(
                 [
                     item_description[1]
-                    for item_description in sorted(
+                    for 
+                        item_description 
+                    in sorted(
                         emails[conversation_id], reverse=True
-                    )[1:]
+                        )[1:]
                 ]
             )
         )
-    return list(to_be_deleted)  # Convert the set to a list before returning
 
+    def mark_older_messages_to_be_deleted(
+            emails: dict[str, list[tuple]], 
+            older_than_timestamp: datetime,
+              to_be_deleted:set, 
+              conversation_id:str) -> set:
+        return to_be_deleted.union(
+            set(
+                [
+                    item_description[1]
+                    for 
+                        item_description 
+                    in 
+                        emails[conversation_id]
+                    if 
+                        item_description[0].timestamp() < older_than_timestamp
+                ]
+            )
+        )
+    
+    older_than_timestamp = older_than.timestamp()
+    to_be_deleted = set()
+    total_count = sum(len(emails[k]) for k in emails.keys())
+    print(
+        f"\n\n{GREEN}Finding which emails to delete: {CYAN}{len(emails)}{GREEN} unique items out of "
+        f"{CYAN}{total_count}{GREEN} overall.{NO_COLOR}"
+    )
+    for i, conversation_id in enumerate(emails):
+        progress(
+            i + 1,
+            len(emails),
+            f"Adding emails to be deleted {i + 1} of {len(emails)}, {len(to_be_deleted)} "
+            "to be deleted.                ",
+        )
+        to_be_deleted = mark_older_messages_to_be_deleted(emails, older_than_timestamp, to_be_deleted, conversation_id)
+        to_be_deleted = mark_conversation_items_other_than_the_last_to_be_deleted(emails, to_be_deleted, conversation_id)
+    return list(to_be_deleted) 
 
 def retrieve_folders(include_inbox: bool) -> list["win32com.client.CDispatch"]:
     """
@@ -171,7 +226,7 @@ def retrieve_folders(include_inbox: bool) -> list["win32com.client.CDispatch"]:
     it includes the inbox in the retrieval. It prints the number of folders being looked at.
     """
     inbox = OUTLOOK.GetDefaultFolder(INBOX_ITEMS)
-    print(f"\n{GREEN}Looking at {CYAN}{inbox.Folders.Count} {GREEN} Folders{NO_COLOR}")
+    print(f"\n\n{GREEN}Looking at {CYAN}{inbox.Folders.Count} {GREEN} Folders{NO_COLOR}")
     folders = [inbox.Folders(i) for i in range(1, inbox.Folders.Count + 1)]
     folders.extend([inbox] if include_inbox else [])
     return folders
@@ -194,7 +249,7 @@ def delete_items(to_be_deleted: set[str]) -> int:
     The function also keeps track of the total number of emails processed and displays 
         a progress bar.
     """
-    print(f"\n{GREEN}Deleting {CYAN}{len(to_be_deleted)} {GREEN} emails.{NO_COLOR}")
+    print(f"\n\n{GREEN}Deleting {CYAN}{len(to_be_deleted)} {GREEN} emails.{NO_COLOR}")
     processed = 0
     deleted = 0
     deleted_items_folder = OUTLOOK.GetDefaultFolder(DELETED_ITEMS)
@@ -241,24 +296,26 @@ def get_initial_description() -> str:
                 break
     return initial_description
 
+def kill_process(process_name: str) -> None:
+    """
+    Kill a process using PowerShell.
+
+    Parameters:
+    process_name (str): The name of the process to kill.
+    """
+    cmd = '" Get-Process #PROCESS_NAME# -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); }"'
+    cmd = cmd.replace("#PROCESS_NAME#", process_name)
+    subprocess.call(["powershell", cmd,])
+
 def kill_outlook() -> None:
     """
     Kill any existing Outlook processes using PowerShell.
     """
-    subprocess.call(
-        [
-            "powershell",
-            '" Get-Process OUTLOOK -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); }"',
-        ]
-    )
-    subprocess.call(
-        [
-            "powershell",
-            '" Get-Process olk     -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); }"',
-        ]
-    )
+    kill_process("OUTLOOK")
+    kill_process("olk")
 
 def validate_date(date_text):
+    """Validate a date string in the format YYYY-MM-DD, returns the date as datetime if OK, or throws ArgumentTypeError otherwise."""
     try:
         return datetime.strptime(date_text, "%Y-%m-%d")
     except ValueError:
@@ -266,12 +323,12 @@ def validate_date(date_text):
             f"Invalid date format: '{date_text}'. Expected format: YYYY-MM-DD"
         )
 
-def main(include_inbox: bool = False, start_date:datetime = DEFAULT_START_DATE) -> None:
+def main(include_inbox: bool = False, start_date:datetime = DEFAULT_START_DATE, older_than:datetime = DEFAULT_START_DATE) -> None:
     kill_outlook()    
     folders = retrieve_folders(include_inbox)
     total_count = sum(f.Items.Count for f in folders)
     emails = retrieve_emails(folders, total_count, start_date)
-    to_be_deleted = determine_items_to_be_deleted(emails)
+    to_be_deleted = determine_items_to_be_deleted(emails, older_than)
     deleted_count = delete_items(to_be_deleted)
     print(f"\n\n{GREEN}Done, deleted {deleted_count} items.{NO_COLOR}")
 
@@ -309,10 +366,21 @@ if __name__ == "__main__":
         type=validate_date,
         default=DEFAULT_START_DATE,
         required=False,
-        help=f"Start date to start email search in format YYYY-MM-DD, default is {DEFAULT_START_DATE}.",
-    )    
+        help=f"Start date to start email search in format YYYY-MM-DD, default is {DEFAULT_START_DATE}. You can use either --start-date or --older-than, but not both.",
+    )
+    parser.add_argument(
+        "-o",
+        "--older-than",
+        type=validate_date,
+        default=DEFAULT_START_DATE,
+        required=False,
+        help=f"Will delete emails up to this date in format YYYY-MM-DD, default is {DEFAULT_START_DATE}. You can use either --start-date or --older-than, but not both.",
+    )
+    dsd = validate_date(DEFAULT_START_DATE)
     args = parser.parse_args()
+    if args.start_date != dsd and args.older_than != dsd:
+        parser.error("--start-date and --older-than are mutually exclusive.")
     KEEP_CATEGORY_REGEX = re.compile(args.keep_category_regex)
-    main(args.inbox, args.start_date)
+    main(args.inbox, args.start_date, args.older_than)
     OUTLOOK.Application.Quit()
     del OUTLOOK
